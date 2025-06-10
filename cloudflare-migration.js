@@ -78,43 +78,35 @@ class CloudflareImageMigrator {
       const sqlContent = await fs.readFile(filePath, 'utf8');
       const records = [];
       
-      // Extract INSERT statements
-      const insertRegex = /INSERT INTO `course_urls`[^;]+;/gi;
-      const insertStatements = sqlContent.match(insertRegex);
+      // Find the INSERT statement for course_urls (handle multi-line)
+      const insertMatch = sqlContent.match(/INSERT INTO `course_urls`[^;]*VALUES\s*([\s\S]*?);/i);
       
-      if (!insertStatements) {
-        throw new Error('No INSERT statements found in SQL file');
+      if (!insertMatch) {
+        throw new Error('No INSERT statement found for course_urls table');
       }
 
-      insertStatements.forEach(statement => {
-        // Extract values from INSERT statement
-        const valuesMatch = statement.match(/VALUES\s*(.+)/i);
-        if (valuesMatch) {
-          const valuesString = valuesMatch[1];
-          // Parse each row of values
-          const rowMatches = valuesString.match(/\([^)]+\)/g);
-          
-          if (rowMatches) {
-            rowMatches.forEach(row => {
-              const values = this.parseValues(row);
-              if (values && values.length >= 12) {
-                records.push({
-                  id: values[0],
-                  course_id: values[1],
-                  image_url: values[2],
-                  image_url_backup: values[3],
-                  image_url_ar: values[4],
-                  image_url_ar_backup: values[5],
-                  downloadable_url: values[6],
-                  preview_temp_file: values[7],
-                  preview_video_id: values[8],
-                  preview_url: values[9],
-                  preview_thumbnail_url: values[10],
-                  preview_thumbnail_url_backup: values[11]
-                });
-              }
-            });
-          }
+      const valuesSection = insertMatch[1];
+      
+      // Parse individual record rows - handle multi-line and nested parentheses
+      const rows = this.extractRows(valuesSection);
+      
+      rows.forEach(row => {
+        const values = this.parseValues(row);
+        if (values && values.length >= 12) {
+          records.push({
+            id: values[0],
+            course_id: values[1],
+            image_url: values[2],
+            image_url_backup: values[3],
+            image_url_ar: values[4],
+            image_url_ar_backup: values[5],
+            downloadable_url: values[6],
+            preview_temp_file: values[7],
+            preview_video_id: values[8],
+            preview_url: values[9],
+            preview_thumbnail_url: values[10],
+            preview_thumbnail_url_backup: values[11]
+          });
         }
       });
 
@@ -123,6 +115,58 @@ class CloudflareImageMigrator {
     } catch (error) {
       throw new Error(`Failed to parse SQL file: ${error.message}`);
     }
+  }
+
+  extractRows(valuesSection) {
+    const rows = [];
+    let currentRow = '';
+    let depth = 0;
+    let inQuotes = false;
+    let quoteChar = '';
+    
+    for (let i = 0; i < valuesSection.length; i++) {
+      const char = valuesSection[i];
+      
+      if (!inQuotes && (char === "'" || char === '"')) {
+        inQuotes = true;
+        quoteChar = char;
+        currentRow += char;
+      } else if (inQuotes && char === quoteChar) {
+        // Check if it's an escaped quote
+        if (valuesSection[i + 1] === quoteChar) {
+          currentRow += char + char;
+          i++; // Skip next character
+        } else {
+          inQuotes = false;
+          quoteChar = '';
+          currentRow += char;
+        }
+      } else if (!inQuotes && char === '(') {
+        depth++;
+        currentRow += char;
+      } else if (!inQuotes && char === ')') {
+        depth--;
+        currentRow += char;
+        
+        // If we've closed the outermost parentheses, we have a complete row
+        if (depth === 0 && currentRow.trim().startsWith('(')) {
+          rows.push(currentRow.trim());
+          currentRow = '';
+        }
+      } else if (!inQuotes && char === ',' && depth === 0) {
+        // Skip commas between rows
+        continue;
+      } else {
+        currentRow += char;
+      }
+    }
+    
+    // Add any remaining row
+    if (currentRow.trim() && currentRow.trim().startsWith('(')) {
+      rows.push(currentRow.trim());
+    }
+    
+    return rows;
   }
 
   parseValues(valuesString) {
@@ -175,6 +219,15 @@ class CloudflareImageMigrator {
         const client = parsedUrl.protocol === 'https:' ? https : http;
 
         const request = client.get(url, (response) => {
+          // Handle redirects
+          if (response.statusCode === 301 || response.statusCode === 302) {
+            const redirectUrl = response.headers.location;
+            if (redirectUrl) {
+              console.log(chalk.gray(`    Following redirect to: ${redirectUrl}`));
+              return this.downloadImage(redirectUrl, retries).then(resolve).catch(reject);
+            }
+          }
+          
           if (response.statusCode !== 200) {
             return reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
           }
@@ -260,14 +313,14 @@ class CloudflareImageMigrator {
   async processRecord(record) {
     const updates = {};
     const urlFields = [
-      { field: 'image_url', type: 'main' },
-      { field: 'image_url_ar', type: 'ar' },
-      { field: 'preview_thumbnail_url', type: 'thumb' }
+      { field: 'image_url', backupField: 'image_url_backup', type: 'main' },
+      { field: 'image_url_ar', backupField: 'image_url_ar_backup', type: 'ar' },
+      { field: 'preview_thumbnail_url', backupField: 'preview_thumbnail_url_backup', type: 'thumb' }
     ];
 
     console.log(chalk.yellow(`\n🔄 Processing record ID: ${record.id}`));
 
-    for (const { field, type } of urlFields) {
+    for (const { field, backupField, type } of urlFields) {
       const originalUrl = record[field];
       if (!originalUrl || originalUrl === 'NULL') {
         console.log(chalk.gray(`  ⏭️  Skipping ${field} (no URL)`));
@@ -284,8 +337,11 @@ class CloudflareImageMigrator {
           const cloudflareUrl = await this.uploadLimit(() => this.uploadToCloudflare(imageData, fileName));
           
           if (cloudflareUrl) {
+            // Move original URL to backup field and set new Cloudflare URL
+            updates[backupField] = originalUrl;
             updates[field] = cloudflareUrl;
             console.log(chalk.green(`  ✓ ${field} uploaded successfully`));
+            console.log(chalk.gray(`    📦 Original URL backed up to ${backupField}`));
           }
         }
       } catch (error) {

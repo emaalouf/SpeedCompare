@@ -71,7 +71,8 @@ Processing [██████████████████████�
 
 ## 🛡️ Safety Features
 
-- **Non-destructive**: Only updates the 3 image URL fields
+- **Safe Backup**: Original URLs are moved to backup fields before updating
+- **Non-destructive**: Only updates image URL fields (preserves all other data)
 - **Resilient**: Continues even if some images fail
 - **Retries**: Automatically retries failed downloads/uploads
 - **Progress tracking**: Real-time status updates

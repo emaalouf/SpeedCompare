@@ -85,7 +85,9 @@ The migration tool will:
    - `image_url_ar` (Arabic course image)
    - `preview_thumbnail_url` (video thumbnail)
 3. **Upload to Cloudflare**: Upload each image to Cloudflare Images
-4. **Update Database**: Replace old URLs with new Cloudflare CDN URLs
+4. **Backup & Update Database**: 
+   - Move original URLs to backup fields (`image_url_backup`, `image_url_ar_backup`, `preview_thumbnail_url_backup`)
+   - Replace main fields with new Cloudflare CDN URLs
 5. **Progress Tracking**: Show real-time progress and statistics
 
 ## Features
@@ -151,11 +153,16 @@ Processing [██████████████████████�
 
 The tool expects a `course_urls` table with these columns:
 - `id` - Primary key
-- `image_url` - Main course image URL
-- `image_url_ar` - Arabic course image URL
-- `preview_thumbnail_url` - Video thumbnail URL
+- `image_url` - Main course image URL (will be updated with Cloudflare URL)
+- `image_url_backup` - Backup for original main image URL
+- `image_url_ar` - Arabic course image URL (will be updated with Cloudflare URL)
+- `image_url_ar_backup` - Backup for original Arabic image URL
+- `preview_thumbnail_url` - Video thumbnail URL (will be updated with Cloudflare URL)
+- `preview_thumbnail_url_backup` - Backup for original thumbnail URL
 
-Only these three fields will be updated with new Cloudflare URLs.
+The migration will:
+1. Move original URLs to backup fields
+2. Update main fields with new Cloudflare URLs
 
 ## Troubleshooting
 
